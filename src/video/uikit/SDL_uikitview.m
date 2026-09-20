@@ -25,6 +25,7 @@
 #include "SDL_uikitview.h"
 
 #include "SDL_hints.h"
+#include "SDL_keyboard.h"
 #include "../../events/SDL_mouse_c.h"
 #include "../../events/SDL_touch_c.h"
 #include "../../events/SDL_events_c.h"
@@ -39,6 +40,7 @@
     SDL_TouchID touchId;
     UITouch * __weak firstFingerDown;
     UITouch * __weak secondaryButtonDown;
+    UIKeyModifierFlags activeModifiers;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame
@@ -324,22 +326,80 @@
     }
 }
 
-- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event
+#if !TARGET_OS_TV
+/* UIKey.keyCode is a UIKeyboardHIDUsage, and SDL_Scancode is defined from the
+   same USB HID usage table, so for the keyboard page the two coincide exactly
+   (A is 4 in both, Return 40, LeftControl 224, ...). */
+- (SDL_Scancode)scancodeFromKey:(UIKey *)key API_AVAILABLE(ios(13.4))
+{
+    long usage = key ? key.keyCode : 0;
+
+    if (usage > 0 && usage < SDL_NUM_SCANCODES) {
+        return (SDL_Scancode)usage;
+    }
+    return SDL_SCANCODE_UNKNOWN;
+}
+
+/* iOS does not deliver a press for a modifier on its own; it reports which
+   modifiers were held on every other press. Diff that against what we last
+   saw and synthesise the key events SDL needs to keep its modifier state. */
+- (void)syncModifiers:(UIKeyModifierFlags)flags API_AVAILABLE(ios(13.4))
+{
+    static const UIKeyModifierFlags uiFlags[] = {
+        UIKeyModifierShift, UIKeyModifierControl,
+        UIKeyModifierAlternate, UIKeyModifierCommand
+    };
+    static const SDL_Scancode codes[] = {
+        SDL_SCANCODE_LSHIFT, SDL_SCANCODE_LCTRL,
+        SDL_SCANCODE_LALT, SDL_SCANCODE_LGUI
+    };
+
+    for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
+        BOOL isDown = (flags & uiFlags[i]) != 0;
+        BOOL wasDown = (activeModifiers & uiFlags[i]) != 0;
+        if (isDown != wasDown) {
+            SDL_SendKeyboardKey(isDown ? SDL_PRESSED : SDL_RELEASED, codes[i]);
+        }
+    }
+    activeModifiers = flags;
+}
+#endif
+
+- (void)handlePresses:(NSSet<UIPress *> *)presses state:(Uint8)state
 {
     for (UIPress *press in presses) {
-        SDL_Scancode scancode = [self scancodeFromPressType:press.type];
-        SDL_SendKeyboardKey(SDL_PRESSED, scancode);
+        SDL_Scancode scancode = SDL_SCANCODE_UNKNOWN;
+
+#if !TARGET_OS_TV
+        if (@available(iOS 13.4, *)) {
+            /* Text entry already reaches SDL through the hidden text field;
+               sending scancodes as well would enter every character twice. */
+            if (press.key && !SDL_IsTextInputActive()) {
+                [self syncModifiers:press.key.modifierFlags];
+                scancode = [self scancodeFromKey:press.key];
+            }
+        }
+#endif
+        if (scancode == SDL_SCANCODE_UNKNOWN) {
+            /* Apple TV remote, and anything older than iOS 13.4. */
+            scancode = [self scancodeFromPressType:press.type];
+        }
+        if (scancode != SDL_SCANCODE_UNKNOWN) {
+            SDL_SendKeyboardKey(state, scancode);
+        }
     }
+}
+
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event
+{
+    [self handlePresses:presses state:SDL_PRESSED];
 
     [super pressesBegan:presses withEvent:event];
 }
 
 - (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event
 {
-    for (UIPress *press in presses) {
-        SDL_Scancode scancode = [self scancodeFromPressType:press.type];
-        SDL_SendKeyboardKey(SDL_RELEASED, scancode);
-    }
+    [self handlePresses:presses state:SDL_RELEASED];
 
     [super pressesEnded:presses withEvent:event];
 }
