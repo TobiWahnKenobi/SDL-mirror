@@ -78,6 +78,13 @@
         if (@available(iOS 13.4, *)) {
             UIHoverGestureRecognizer *hover = [[UIHoverGestureRecognizer alloc]
                 initWithTarget:self action:@selector(pointerHover:)];
+            /* This recogniser exists only to observe hover events; it must
+               never swallow or postpone a real touch. The defaults would
+               cancel touches in the view and hold back touchesEnded until the
+               recogniser fails. */
+            hover.cancelsTouchesInView = NO;
+            hover.delaysTouchesBegan = NO;
+            hover.delaysTouchesEnded = NO;
             [self addGestureRecognizer:hover];
         }
 #endif
