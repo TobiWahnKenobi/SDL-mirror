@@ -38,6 +38,7 @@
 
     SDL_TouchID touchId;
     UITouch * __weak firstFingerDown;
+    UITouch * __weak secondaryButtonDown;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame
@@ -69,6 +70,16 @@
 
 #if !TARGET_OS_TV
         self.multipleTouchEnabled = YES;
+
+        /* iPadOS 13.4+ reports trackpad/mouse movement that happens with no
+           button held through a hover recogniser rather than through touches,
+           so without this the app is never told the pointer moved and
+           mouse-over states only update on click. */
+        if (@available(iOS 13.4, *)) {
+            UIHoverGestureRecognizer *hover = [[UIHoverGestureRecognizer alloc]
+                initWithTarget:self action:@selector(pointerHover:)];
+            [self addGestureRecognizer:hover];
+        }
 #endif
 
         touchId = 1;
@@ -158,10 +169,50 @@
     return 1.0f;
 }
 
+#if !TARGET_OS_TV
+- (void)pointerHover:(UIHoverGestureRecognizer *)recognizer API_AVAILABLE(ios(13.4))
+{
+    switch (recognizer.state) {
+        case UIGestureRecognizerStateBegan:
+        case UIGestureRecognizerStateChanged: {
+            CGPoint point = [recognizer locationInView:self];
+            /* Mouse ID 0, not SDL_TOUCH_MOUSEID: this is a real pointer, and
+               applications routinely discard touch-emulated mouse events. */
+            SDL_SendMouseMotion(sdlwindow, 0, 0, (int)point.x, (int)point.y);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+/* Is this touch a secondary (right) click from an indirect pointer? */
+- (BOOL)isSecondaryClick:(UITouch *)touch withEvent:(UIEvent *)event
+{
+    if (@available(iOS 13.4, *)) {
+        return touch.type == UITouchTypeIndirectPointer &&
+               (event.buttonMask & UIEventButtonMaskSecondary) != 0;
+    }
+    return NO;
+}
+#endif
+
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event
 {
     for (UITouch *touch in touches) {
         float pressure = [self pressureForTouch:touch];
+
+#if !TARGET_OS_TV
+        /* A secondary click has to be reported as a real right-button press:
+           the touch path below can only ever express SDL_BUTTON_LEFT. */
+        if (!secondaryButtonDown && [self isSecondaryClick:touch withEvent:event]) {
+            CGPoint point = [self touchLocation:touch shouldNormalize:NO];
+            SDL_SendMouseMotion(sdlwindow, 0, 0, (int)point.x, (int)point.y);
+            SDL_SendMouseButton(sdlwindow, 0, SDL_PRESSED, SDL_BUTTON_RIGHT);
+            secondaryButtonDown = touch;
+            continue;
+        }
+#endif
 
         if (!firstFingerDown) {
             CGPoint locationInView = [self touchLocation:touch shouldNormalize:NO];
@@ -187,6 +238,15 @@
     for (UITouch *touch in touches) {
         float pressure = [self pressureForTouch:touch];
 
+#if !TARGET_OS_TV
+        if (touch == secondaryButtonDown) {
+            /* buttonMask is already clear by now, so go by the tracked touch. */
+            SDL_SendMouseButton(sdlwindow, 0, SDL_RELEASED, SDL_BUTTON_RIGHT);
+            secondaryButtonDown = nil;
+            continue;
+        }
+#endif
+
         if (touch == firstFingerDown) {
             /* send mouse up */
             int clicks = (int) touch.tapCount;
@@ -209,6 +269,14 @@
 {
     for (UITouch *touch in touches) {
         float pressure = [self pressureForTouch:touch];
+
+#if !TARGET_OS_TV
+        if (touch == secondaryButtonDown) {
+            CGPoint point = [self touchLocation:touch shouldNormalize:NO];
+            SDL_SendMouseMotion(sdlwindow, 0, 0, (int)point.x, (int)point.y);
+            continue;
+        }
+#endif
 
         if (touch == firstFingerDown) {
             CGPoint locationInView = [self touchLocation:touch shouldNormalize:NO];
